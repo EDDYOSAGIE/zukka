@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #102033;
+  background: #f2f8fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.navy-hero {
+  background:
+    radial-gradient(circle at 78% 24%, rgba(124, 199, 232, 0.34), transparent 28rem),
+    linear-gradient(90deg, rgba(7, 26, 45, 0.98), rgba(10, 37, 64, 0.86) 52%, rgba(10, 37, 64, 0.7)),
+    url("/home/social-shopping.png");
+  background-size: cover;
+  background-position: center;
+}
+
+.floating-social-card {
+  animation: floatSocial 7s ease-in-out infinite;
+}
+
+.delay-float {
+  animation-delay: -2.1s;
+}
+
+.slow-float {
+  animation-duration: 8.8s;
+  animation-delay: -4s;
+}
+
+@keyframes floatSocial {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+  50% {
+    translate: 0 -14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .floating-social-card {
+    animation: none;
+  }
+}
+
+.focus-ring:focus-visible {
+  outline: 3px solid #7cc7e8;
+  outline-offset: 2px;
+}
