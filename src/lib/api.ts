@@ -50,6 +50,7 @@ type MerchantDashboardResponse = {
     business_name: string;
     sector?: string;
     zuka_trust_score: number;
+    meta_connected?: boolean;
   };
   metrics: {
     gmv: number;
@@ -186,27 +187,6 @@ export async function getMetaConnectUrl(): Promise<MetaConnectResponse> {
   return parseApiResponse<MetaConnectResponse>(response);
 }
 
-export async function finalizeMetaConnection(code: string): Promise<{ ok: boolean; meta_page_id?: string; message?: string }> {
-  const response = await fetch(`${apiBaseUrl}/v1/meta/finalize?code=${encodeURIComponent(code)}`, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json"
-    }
-  });
-
-  return parseApiResponse<{ ok: boolean; meta_page_id?: string; message?: string }>(response);
-}
-
-export async function getDeliveryByOrder(orderId: string): Promise<{ success: boolean; data?: any }> {
-  const response = await fetch(`${apiBaseUrl}/api/delivery/order/${encodeURIComponent(orderId)}`, {
-    method: "GET",
-    credentials: "include"
-  });
-
-  return parseApiResponse<{ success: boolean; data?: any }>(response);
-}
-
 export async function createCheckoutOrder(payload: CreateCheckoutOrderRequest): Promise<CreateCheckoutOrderResponse> {
   const response = await fetch(`${apiBaseUrl}/v1/orders/checkout`, {
     method: "POST",
@@ -240,6 +220,88 @@ export async function createScheduledDrop(payload: CreateScheduledDropPayload): 
   });
 
   return parseApiResponse<{ drop: MerchantDashboardResponse["scheduled_drops"][number] }>(response);
+}
+
+export async function requestPasswordReset(email: string): Promise<{ ok: boolean; message: string; resetToken?: string }> {
+  const response = await fetch(`${apiBaseUrl}/v1/auth/forgot-password`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ email })
+  });
+
+  return parseApiResponse<{ ok: boolean; message: string; resetToken?: string }>(response);
+}
+
+export async function confirmPasswordReset(token: string, newPassword: string): Promise<{ ok: boolean; message: string }> {
+  const response = await fetch(`${apiBaseUrl}/v1/auth/reset-password`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ token, newPassword })
+  });
+
+  return parseApiResponse<{ ok: boolean; message: string }>(response);
+}
+
+export async function initializePaystackPayment(params: {
+  orderId?: string;
+  amountNaira: number;
+  customerPhone?: string;
+  email?: string;
+}): Promise<{ ok: boolean; authorization_url?: string; access_code?: string; reference?: string; simulated?: boolean; message?: string }> {
+  const response = await fetch(`${apiBaseUrl}/v1/orders/paystack/initialize`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(params)
+  });
+
+  return parseApiResponse<{ ok: boolean; authorization_url?: string; access_code?: string; reference?: string; simulated?: boolean; message?: string }>(response);
+}
+
+export async function verifyPaystackPayment(reference: string): Promise<{ ok: boolean; status: string; message: string; order?: unknown }> {
+  const response = await fetch(`${apiBaseUrl}/v1/orders/paystack/verify/${encodeURIComponent(reference)}`, {
+    method: "GET",
+    credentials: "include"
+  });
+
+  return parseApiResponse<{ ok: boolean; status: string; message: string; order?: unknown }>(response);
+}
+
+export async function getMerchantChats(): Promise<{ chats: Array<{ id: string; merchant_id?: string; platform: "instagram" | "whatsapp"; external_user_id?: string; user_handle?: string; message_text: string; direction?: "inbound" | "outbound"; sentiment_flag?: string; created_at: string }> }> {
+  const response = await fetch(`${apiBaseUrl}/v1/merchant/chats`, {
+    method: "GET",
+    credentials: "include"
+  });
+
+  return parseApiResponse<{ chats: Array<{ id: string; merchant_id?: string; platform: "instagram" | "whatsapp"; external_user_id?: string; user_handle?: string; message_text: string; direction?: "inbound" | "outbound"; sentiment_flag?: string; created_at: string }> }>(response);
+}
+
+export async function replyToChatMessage(chatId: string, messageText: string, suggestedPrice?: number): Promise<{ ok: boolean; message?: string; chatId?: string }> {
+  const response = await fetch(`${apiBaseUrl}/v1/merchant/chats/${encodeURIComponent(chatId)}/reply`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ messageText, suggestedPrice })
+  });
+
+  return parseApiResponse<{ ok: boolean; message?: string; chatId?: string }>(response);
+}
+
+export async function getDeliveryByOrder(orderId: string): Promise<{ success: boolean; data?: Record<string, unknown>; message?: string }> {
+  const response = await fetch(`${apiBaseUrl}/delivery/order/${encodeURIComponent(orderId)}`, {
+    method: "GET",
+    credentials: "include"
+  });
+
+  return parseApiResponse<{ success: boolean; data?: Record<string, unknown>; message?: string }>(response);
 }
 
 export async function listAvailableRiders(lga: string): Promise<AvailableRider[]> {

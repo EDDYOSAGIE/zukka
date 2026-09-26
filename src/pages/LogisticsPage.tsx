@@ -32,7 +32,7 @@ export function LogisticsPage() {
       orders.map(async (order) => {
         try {
           const response = await getDeliveryByOrder(order.id);
-          const delivery = response?.data ?? null;
+          const delivery = (response?.data ?? null) as { provider?: string; status?: string } | null;
           if (!mounted || !delivery) return;
 
           setDeliveryStatusByOrder((current) => ({

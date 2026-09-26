@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import axios from "axios";
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
+import { initializePaystackTransaction, verifyPaystackTransaction } from "../services/paystackService";
 
 type PaystackWebhookPayload = {
   event?: string;
@@ -179,3 +180,115 @@ export function handlePaystackWebhook(req: Request, res: Response) {
     console.error("[paystack.webhook] Async settlement processing failed.", error);
   });
 }
+
+export async function initializePaystackPaymentRoute(
+  req: Request<object, object, { orderId?: string; email?: string; amountNaira?: number; customerPhone?: string }>,
+  res: Response
+) {
+  const { orderId, email, amountNaira, customerPhone } = req.body;
+
+  if (!orderId && !amountNaira) {
+    return res.status(400).json({ error: "missing_fields", message: "orderId or amountNaira is required." });
+  }
+
+  let finalAmount = amountNaira ?? 0;
+  let finalEmail = email || `${customerPhone || "customer"}@zukka.shop`;
+  let reference: string | undefined;
+
+  if (orderId) {
+    const { data: order, error } = await supabase
+      .from("orders")
+      .select("id,amount_naira,paystack_reference,customer_phone")
+      .eq("id", orderId)
+      .maybeSingle<OrderRow>();
+
+    if (!error && order) {
+      finalAmount = Number(order.amount_naira);
+      reference = order.paystack_reference || undefined;
+      if (!email && order.customer_phone) {
+        finalEmail = `${order.customer_phone.replace(/[^0-9]/g, "")}@zukka.shop`;
+      }
+    }
+  }
+
+  try {
+    const result = await initializePaystackTransaction({
+      email: finalEmail,
+      amountNaira: finalAmount,
+      reference,
+      metadata: { order_id: orderId }
+    });
+
+    if (orderId && result.reference) {
+      await supabase
+        .from("orders")
+        .update({
+          paystack_reference: result.reference,
+          checkout_url: result.authorization_url
+        })
+        .eq("id", orderId);
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("[paystack.initialize] Initialization failed:", error);
+    return res.status(500).json({
+      error: "initialization_failed",
+      message: error instanceof Error ? error.message : "Unable to initialize Paystack transaction."
+    });
+  }
+}
+
+export async function verifyPaystackPayment(
+  req: Request<{ reference: string }>,
+  res: Response
+) {
+  const reference = req.params.reference;
+
+  if (!reference) {
+    return res.status(400).json({ error: "missing_reference", message: "Transaction reference is required." });
+  }
+
+  try {
+    const verification = await verifyPaystackTransaction(reference);
+
+    if (verification.ok && verification.status === "success") {
+      const { data: order, error: orderError } = await supabase
+        .from("orders")
+        .select("id,merchant_id,customer_phone,amount_naira,payment_status,paystack_reference,delivery_method,delivery_lga")
+        .eq("paystack_reference", reference)
+        .maybeSingle<OrderRow>();
+
+      if (!orderError && order) {
+        await supabase
+          .from("orders")
+          .update({
+            payment_status: "paid"
+          })
+          .eq("id", order.id);
+
+        await routeSettledOrder({ ...order, payment_status: "paid" });
+      }
+
+      return res.status(200).json({
+        ok: true,
+        status: "paid",
+        message: "Payment verified successfully.",
+        order
+      });
+    }
+
+    return res.status(200).json({
+      ok: false,
+      status: verification.status,
+      message: "Payment could not be verified as successful."
+    });
+  } catch (error) {
+    console.error("[paystack.verify] Verification error:", error);
+    return res.status(500).json({
+      error: "verification_error",
+      message: error instanceof Error ? error.message : "Unable to verify transaction."
+    });
+  }
+}
+

@@ -3,12 +3,24 @@ import http from "node:http";
 import cors from "cors";
 import express, { Request, Response } from "express";
 import { Server, Socket } from "socket.io";
-import { loginMerchant, logoutMerchant, registerMerchant } from "./controllers/authController";
+import { forgotPassword, loginMerchant, logoutMerchant, registerMerchant, resetPassword } from "./controllers/authController";
 import { checkoutRoutes } from "./controllers/checkoutController";
 import { createMerchantDrop, getMerchantDashboard } from "./controllers/dashboardController";
-import { getMetaConnectUrl, handleMetaCallback, receiveMetaWebhook, verifyMetaWebhook } from "./controllers/metaController";
-import { handleMetaFinalize } from "./controllers/metaController";
-import { handlePaystackWebhook } from "./controllers/paystackController";
+import {
+  getMetaConnectUrl,
+  handleMetaCallback,
+  receiveMetaWebhook,
+  verifyMetaWebhook,
+  handleMetaFinalize,
+  getMerchantChats,
+  replyToChat,
+  syncMetaConversations
+} from "./controllers/metaController";
+import {
+  handlePaystackWebhook,
+  initializePaystackPaymentRoute,
+  verifyPaystackPayment
+} from "./controllers/paystackController";
 import { listAvailableRiders, onboardRider } from "./controllers/riderController";
 import { setRealtimeServer } from "./lib/realtime";
 import { authenticateToken } from "./middleware/auth";
@@ -70,15 +82,22 @@ app.get("/health", (_req: Request, res: Response) => {
 app.post("/v1/auth/register", registerMerchant);
 app.post("/v1/auth/login", loginMerchant);
 app.post("/v1/auth/logout", logoutMerchant);
+app.post("/v1/auth/forgot-password", forgotPassword);
+app.post("/v1/auth/reset-password", resetPassword);
 app.get("/v1/meta/connect", authenticateToken, getMetaConnectUrl);
 app.get("/v1/meta/callback", authenticateToken, handleMetaCallback);
 app.post("/v1/meta/finalize", authenticateToken, handleMetaFinalize);
+app.post("/v1/meta/sync", authenticateToken, syncMetaConversations);
 app.get("/v1/merchant/dashboard", authenticateToken, getMerchantDashboard);
+app.get("/v1/merchant/chats", authenticateToken, getMerchantChats);
+app.post("/v1/merchant/chats/:chatId/reply", authenticateToken, replyToChat);
 app.post("/v1/merchant/drops", authenticateToken, createMerchantDrop);
 app.get("/v1/webhooks/meta", verifyMetaWebhook);
 app.post("/v1/webhooks/meta", receiveMetaWebhook);
 app.post(webhookRawBodyPath, handlePaystackWebhook);
 app.post("/v1/orders/checkout", authenticateToken, checkoutRoutes.createCheckoutOrder);
+app.post("/v1/orders/paystack/initialize", initializePaystackPaymentRoute);
+app.get("/v1/orders/paystack/verify/:reference", verifyPaystackPayment);
 app.post("/v1/riders", onboardRider);
 app.get("/v1/riders/available", listAvailableRiders);
 

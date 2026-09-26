@@ -59,8 +59,19 @@
             return;
           }
 
-          if (statusEl) statusEl.textContent = 'Connected successfully. You can close this window.';
+          if (statusEl) statusEl.textContent = 'Connected successfully! Updating dashboard...';
           actionsEl.style.display = 'block';
+
+          if (window.opener && !window.opener.closed) {
+            try {
+              window.opener.postMessage({ type: 'META_AUTH_SUCCESS', code, metaPageId: body?.meta_page_id }, '*');
+              setTimeout(() => {
+                window.close();
+              }, 1200);
+            } catch (e) {
+              console.warn('Unable to notify parent window', e);
+            }
+          }
         } catch (err) {
           if (statusEl) statusEl.textContent = 'Network error: ' + err;
           actionsEl.style.display = 'block';

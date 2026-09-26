@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
 import { io } from "../lib/realtime";
-import { analyzeCustomerIntent } from "../services/openaiService";
+import { analyzeCustomerIntent, CustomerRequestCategory } from "../services/geminiService";
 
 type MetaWebhookQuery = {
   "hub.mode"?: string;
@@ -49,6 +49,8 @@ type MerchantRow = {
   id: string;
   business_name: string;
   meta_page_id: string | null;
+  instagram_business_id?: string | null;
+  meta_page_access_token?: string | null;
 };
 
 type InventoryRow = {
@@ -59,7 +61,7 @@ type InventoryRow = {
   created_at: string;
 };
 
-type ParsedInboundMessage = {
+export type ParsedInboundMessage = {
   platform: "instagram" | "whatsapp";
   senderId: string;
   recipientPageId: string;
@@ -161,34 +163,59 @@ async function exchangeCodeForAccessToken(code: string): Promise<string> {
   return body.access_token;
 }
 
-async function resolveMetaRecipientId(accessToken: string): Promise<string | null> {
-  const pageResponse = await fetch(
-    `https://graph.facebook.com/v16.0/me/accounts?fields=id,name,instagram_business_account&access_token=${encodeURIComponent(
-      accessToken
-    )}`
-  );
+type ResolvedMetaDetails = {
+  metaPageId: string | null;
+  metaPageAccessToken: string | null;
+  instagramBusinessId: string | null;
+};
 
-  const pageData = await pageResponse.json();
-  if (Array.isArray(pageData.data) && pageData.data.length > 0) {
-    const firstPage = pageData.data[0];
-    if (firstPage.instagram_business_account?.id) {
-      return firstPage.instagram_business_account.id;
+async function resolveMetaAccountDetails(accessToken: string): Promise<ResolvedMetaDetails> {
+  let metaPageId: string | null = null;
+  let metaPageAccessToken: string | null = null;
+  let instagramBusinessId: string | null = null;
+
+  try {
+    const pageResponse = await fetch(
+      `https://graph.facebook.com/v16.0/me/accounts?fields=id,name,access_token,instagram_business_account{id}&access_token=${encodeURIComponent(
+        accessToken
+      )}`
+    );
+
+    const pageData = await pageResponse.json();
+    if (Array.isArray(pageData?.data) && pageData.data.length > 0) {
+      const firstPage = pageData.data[0];
+      metaPageId = firstPage.id ?? null;
+      metaPageAccessToken = firstPage.access_token ?? null;
+      if (firstPage.instagram_business_account?.id) {
+        instagramBusinessId = firstPage.instagram_business_account.id;
+      }
     }
-    if (firstPage.id) {
-      return firstPage.id;
-    }
+  } catch (err) {
+    console.warn("[meta.resolve] Error fetching Facebook pages/Instagram business accounts:", err);
   }
 
-  const whatsappResponse = await fetch(
-    `https://graph.facebook.com/v16.0/me?fields=whatsapp_business_accounts{phone_numbers{id}}&access_token=${encodeURIComponent(
-      accessToken
-    )}`
-  );
+  try {
+    const whatsappResponse = await fetch(
+      `https://graph.facebook.com/v16.0/me?fields=whatsapp_business_accounts{phone_numbers{id}}&access_token=${encodeURIComponent(
+        accessToken
+      )}`
+    );
 
-  const whatsappData = await whatsappResponse.json();
-  const account = whatsappData?.whatsapp_business_accounts?.data?.[0];
-  const phoneId = account?.phone_numbers?.data?.[0]?.id;
-  return phoneId ?? null;
+    const whatsappData = await whatsappResponse.json();
+    const account = whatsappData?.whatsapp_business_accounts?.data?.[0];
+    const phoneId = account?.phone_numbers?.data?.[0]?.id;
+    if (phoneId && !metaPageId) {
+      metaPageId = phoneId;
+    }
+  } catch (err) {
+    console.warn("[meta.resolve] Error fetching WhatsApp business accounts:", err);
+  }
+
+  return {
+    metaPageId: instagramBusinessId || metaPageId,
+    metaPageAccessToken,
+    instagramBusinessId
+  };
 }
 
 function renderMetaConnectedHtml(postRedirectUri: string): string {
@@ -229,15 +256,25 @@ export async function handleMetaCallback(req: Request<{ merchantId?: string }, o
 
   try {
     const accessToken = await exchangeCodeForAccessToken(code);
-    const recipientId = await resolveMetaRecipientId(accessToken);
+    const resolved = await resolveMetaAccountDetails(accessToken);
 
-    if (!recipientId) {
+    if (!resolved.metaPageId && !resolved.instagramBusinessId) {
       return res.status(400).send("Meta connection succeeded, but no Instagram or WhatsApp business identifier could be retrieved.");
+    }
+
+    const updatePayload: Record<string, any> = {
+      meta_page_id: resolved.metaPageId
+    };
+    if (resolved.metaPageAccessToken) {
+      updatePayload.meta_page_access_token = resolved.metaPageAccessToken;
+    }
+    if (resolved.instagramBusinessId) {
+      updatePayload.instagram_business_id = resolved.instagramBusinessId;
     }
 
     const { error } = await supabase
       .from("merchants")
-      .update({ meta_page_id: recipientId })
+      .update(updatePayload)
       .eq("id", req.params.merchantId);
 
     if (error) {
@@ -267,15 +304,25 @@ export async function handleMetaFinalize(req: Request<{ merchantId: string }>, r
     }
 
     const accessToken = await exchangeCodeForAccessToken(code);
-    const recipientId = await resolveMetaRecipientId(accessToken);
+    const resolved = await resolveMetaAccountDetails(accessToken);
 
-    if (!recipientId) {
+    if (!resolved.metaPageId && !resolved.instagramBusinessId) {
       return res.status(400).json({ error: "no_recipient", message: "Connected but no Instagram/WhatsApp identifier was found." });
+    }
+
+    const updatePayload: Record<string, any> = {
+      meta_page_id: resolved.metaPageId
+    };
+    if (resolved.metaPageAccessToken) {
+      updatePayload.meta_page_access_token = resolved.metaPageAccessToken;
+    }
+    if (resolved.instagramBusinessId) {
+      updatePayload.instagram_business_id = resolved.instagramBusinessId;
     }
 
     const { error } = await supabase
       .from("merchants")
-      .update({ meta_page_id: recipientId })
+      .update(updatePayload)
       .eq("id", merchantId);
 
     if (error) {
@@ -283,7 +330,11 @@ export async function handleMetaFinalize(req: Request<{ merchantId: string }>, r
       return res.status(500).json({ error: "persist_failed", message: "Failed to save connection to merchant record." });
     }
 
-    return res.status(200).json({ ok: true, meta_page_id: recipientId });
+    return res.status(200).json({
+      ok: true,
+      meta_page_id: resolved.metaPageId,
+      instagram_business_id: resolved.instagramBusinessId
+    });
   } catch (error) {
     console.error("[meta.finalize] Meta finalize failed.", error);
     return res.status(500).json({ error: "finalize_failed", message: error instanceof Error ? error.message : "Failed to finalize Meta connection." });
@@ -374,16 +425,29 @@ function calculateSafeCounterOffer(
   return proposedCounterOffer >= minimumMargin ? proposedCounterOffer : null;
 }
 
-async function processInboundMessage(message: ParsedInboundMessage): Promise<void> {
+export async function processInboundMessage(message: ParsedInboundMessage): Promise<void> {
   console.log(
     `[meta.webhook] Processing ${message.platform} inbound message from ${message.senderId} to ${message.recipientPageId}.`
   );
 
-  const { data: merchant, error: merchantError } = await supabase
+  let { data: merchant, error: merchantError } = await supabase
     .from("merchants")
-    .select("id,business_name,meta_page_id")
+    .select("id,business_name,meta_page_id,instagram_business_id,meta_page_access_token")
     .eq("meta_page_id", message.recipientPageId)
     .maybeSingle<MerchantRow>();
+
+  if (!merchant && !merchantError) {
+    const { data: igMerchant, error: igError } = await supabase
+      .from("merchants")
+      .select("id,business_name,meta_page_id,instagram_business_id,meta_page_access_token")
+      .eq("instagram_business_id", message.recipientPageId)
+      .maybeSingle<MerchantRow>();
+    if (igMerchant) {
+      merchant = igMerchant;
+    } else {
+      merchantError = igError;
+    }
+  }
 
   if (merchantError) {
     console.error("[meta.webhook] Merchant lookup failed.", merchantError);
@@ -413,64 +477,89 @@ async function processInboundMessage(message: ParsedInboundMessage): Promise<voi
     return;
   }
 
-  const { data: inventoryItem, error: inventoryError } = await supabase
+  const { data: inventoryItems, error: inventoryError } = await supabase
     .from("inventory")
     .select("id,item_name,base_price_naira,minimum_margin_naira,created_at")
     .eq("merchant_id", merchant.id)
     .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle<InventoryRow>();
+    .limit(20);
 
   if (inventoryError) {
     console.error("[meta.webhook] Inventory lookup failed.", inventoryError);
-    return;
   }
 
-  if (!inventoryItem) {
-    console.warn(`[meta.webhook] Merchant ${merchant.id} has no inventory item for negotiation analysis.`);
-    return;
+  let inventoryItem: InventoryRow | undefined;
+  if (Array.isArray(inventoryItems) && inventoryItems.length > 0) {
+    const textLower = message.messageText.toLowerCase();
+    inventoryItem = inventoryItems.find((item) => {
+      const words = item.item_name.toLowerCase().split(/\s+/).filter((w: string) => w.length > 2);
+      return words.some((w: string) => textLower.includes(w));
+    }) ?? inventoryItems[0];
   }
 
-  const basePrice = toNumber(inventoryItem.base_price_naira);
-  const minimumMargin = toNumber(inventoryItem.minimum_margin_naira);
-  const analysis = await analyzeCustomerIntent(message.messageText, inventoryItem.item_name, basePrice);
+  const basePrice = inventoryItem ? toNumber(inventoryItem.base_price_naira) : 0;
+  const minimumMargin = inventoryItem ? toNumber(inventoryItem.minimum_margin_naira) : 0;
+  const analysis = await analyzeCustomerIntent(
+    message.messageText,
+    inventoryItem?.item_name ?? "General Item",
+    basePrice
+  );
 
   const { error: updateError } = await supabase
     .from("chat_logs")
-    .update({ sentiment_flag: analysis.customerSentiment })
+    .update({ sentiment_flag: analysis.requestCategory || analysis.customerSentiment })
     .eq("id", chatLog.id);
 
   if (updateError) {
     console.error("[meta.webhook] Failed to update chat sentiment flag.", updateError);
   }
 
-  if (!analysis.detectsBargain) {
-    console.log(`[meta.webhook] Message ${chatLog.id} did not trigger bargain dispatch.`);
-    return;
-  }
+  const safeCounterOffer = inventoryItem
+    ? calculateSafeCounterOffer(analysis.customerOfferPrice, basePrice, minimumMargin)
+    : null;
 
-  const safeCounterOffer = calculateSafeCounterOffer(analysis.customerOfferPrice, basePrice, minimumMargin);
-
-  if (safeCounterOffer === null) {
-    console.warn(`[meta.webhook] Bargain detected for ${chatLog.id}, but safe counter-offer breached floor.`);
-    return;
-  }
-
-  io.to(`merchant_${merchant.id}`).emit("bargain_alert", {
+  // Always emit inbound chat message to merchant room for real-time live inbox
+  io.to(`merchant_${merchant.id}`).emit("inbound_chat", {
+    chatLogId: chatLog.id,
     merchantId: merchant.id,
     channel: message.platform,
     buyerHandle: message.userHandle,
     externalUserId: message.senderId,
+    messageText: message.messageText,
+    createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    detectsBargain: analysis.detectsBargain,
+    customerSentiment: analysis.customerSentiment,
+    requestCategory: analysis.requestCategory,
+    summary: analysis.summary,
+    itemId: inventoryItem?.id,
+    itemName: inventoryItem?.item_name,
+    originalPrice: basePrice,
+    customerOfferPrice: analysis.customerOfferPrice ?? null,
+    recommendedCounterOfferPrice: safeCounterOffer
+  });
+
+  if (!analysis.detectsBargain || safeCounterOffer === null || !inventoryItem) {
+    console.log(`[meta.webhook] Inbound message ${chatLog.id} streamed to live inbox (bargain alert not triggered).`);
+    return;
+  }
+
+  // If bargain detected and safe counteroffer exists, emit bargain alert
+  io.to(`merchant_${merchant.id}`).emit("bargain_alert", {
+    chatLogId: chatLog.id,
+    merchantId: merchant.id,
+    channel: message.platform,
+    buyerHandle: message.userHandle,
+    externalUserId: message.senderId,
+    messageText: message.messageText,
     originalPrice: basePrice,
     itemName: inventoryItem.item_name,
+    itemId: inventoryItem.id,
     recommendedCounterOfferPrice: safeCounterOffer,
     customerOfferPrice: analysis.customerOfferPrice ?? null,
-    customerSentiment: analysis.customerSentiment,
-    chatLogId: chatLog.id
+    customerSentiment: analysis.customerSentiment
   });
 
   console.log(`[meta.webhook] Bargain alert emitted for merchant ${merchant.id} on ${message.platform}.`);
-  /* FOUNDER_INNOVATION_SPACE_MODULE_1_CHANNELS_AND_NEGOTIATION */
 }
 
 async function processInboundMessagesSafely(messages: ParsedInboundMessage[]): Promise<void> {
@@ -517,3 +606,260 @@ export function receiveMetaWebhook(req: Request<object, string, MetaWebhookBody>
 
   void processInboundMessagesSafely(messages);
 }
+
+export async function dispatchMetaMessage({
+  platform,
+  recipientId,
+  messageText,
+  accessToken
+}: {
+  platform: "instagram" | "whatsapp";
+  recipientId: string;
+  messageText: string;
+  accessToken?: string | null;
+}): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+  if (!accessToken) {
+    console.log(`[meta.dispatch] No access token available; recorded locally for ${platform} to ${recipientId}.`);
+    return { ok: true, messageId: "local-dispatch" };
+  }
+
+  try {
+    if (platform === "whatsapp") {
+      const response = await fetch(`https://graph.facebook.com/v16.0/me/messages`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: recipientId,
+          type: "text",
+          text: { body: messageText }
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        console.warn("[meta.dispatch] WhatsApp API returned error:", data);
+        return { ok: false, error: data?.error?.message ?? "WhatsApp delivery failed" };
+      }
+      return { ok: true, messageId: data?.messages?.[0]?.id };
+    } else {
+      const response = await fetch(`https://graph.facebook.com/v16.0/me/messages`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          recipient: { id: recipientId },
+          message: { text: messageText }
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        console.warn("[meta.dispatch] Instagram API returned error:", data);
+        return { ok: false, error: data?.error?.message ?? "Instagram delivery failed" };
+      }
+      return { ok: true, messageId: data?.message_id };
+    }
+  } catch (error) {
+    console.error("[meta.dispatch] Outbound delivery exception:", error);
+    return { ok: false, error: error instanceof Error ? error.message : "Dispatch failed" };
+  }
+}
+
+export async function getMerchantChats(req: Request<{ merchantId?: string }>, res: Response) {
+  const merchantId = req.params.merchantId;
+  if (!merchantId) {
+    return res.status(401).json({ error: "unauthorized", message: "Merchant authentication required." });
+  }
+
+  try {
+    const { data: chatRows, error: chatError } = await supabase
+      .from("chat_logs")
+      .select("id,merchant_id,platform,external_user_id,user_handle,message_text,direction,sentiment_flag,created_at")
+      .eq("merchant_id", merchantId)
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (chatError) {
+      console.error("[meta.chats] Failed to fetch chat logs:", chatError);
+      return res.status(500).json({ error: "chat_fetch_failed", message: "Unable to load chats." });
+    }
+
+    return res.status(200).json({ chats: chatRows ?? [] });
+  } catch (err) {
+    console.error("[meta.chats] Exception fetching chats:", err);
+    return res.status(500).json({ error: "server_error", message: "Unable to load chats." });
+  }
+}
+
+export async function replyToChat(
+  req: Request<{ merchantId?: string; chatId?: string }, object, { messageText?: string; suggestedPrice?: number }>,
+  res: Response
+) {
+  const merchantId = req.params.merchantId;
+  const chatId = req.params.chatId;
+  const messageText = req.body?.messageText?.trim();
+  const suggestedPrice = req.body?.suggestedPrice;
+
+  if (!merchantId || !chatId || !messageText) {
+    return res.status(400).json({ error: "missing_fields", message: "chatId and messageText are required." });
+  }
+
+  try {
+    const { data: originalChat, error: lookupError } = await supabase
+      .from("chat_logs")
+      .select("id,merchant_id,platform,external_user_id,user_handle")
+      .eq("id", chatId)
+      .eq("merchant_id", merchantId)
+      .maybeSingle<{
+        id: string;
+        merchant_id: string;
+        platform: "instagram" | "whatsapp";
+        external_user_id: string;
+        user_handle: string;
+      }>();
+
+    if (lookupError || !originalChat) {
+      return res.status(404).json({ error: "chat_not_found", message: "Target chat not found." });
+    }
+
+    const { data: merchant } = await supabase
+      .from("merchants")
+      .select("meta_page_access_token")
+      .eq("id", merchantId)
+      .maybeSingle<{ meta_page_access_token: string | null }>();
+
+    const { data: outboundLog, error: insertError } = await supabase
+      .from("chat_logs")
+      .insert({
+        merchant_id: merchantId,
+        platform: originalChat.platform,
+        external_user_id: originalChat.external_user_id,
+        user_handle: originalChat.user_handle,
+        message_text: messageText,
+        direction: "outbound",
+        sentiment_flag: suggestedPrice ? "counteroffer_sent" : "merchant_reply"
+      })
+      .select("id,created_at")
+      .single<{ id: string; created_at: string }>();
+
+    if (insertError) {
+      console.error("[meta.reply] Failed to record outbound chat:", insertError);
+      return res.status(500).json({ error: "record_failed", message: "Unable to save reply." });
+    }
+
+    await dispatchMetaMessage({
+      platform: originalChat.platform,
+      recipientId: originalChat.external_user_id,
+      messageText,
+      accessToken: merchant?.meta_page_access_token
+    });
+
+    return res.status(200).json({
+      ok: true,
+      chatLogId: outboundLog?.id,
+      message: "Reply sent and recorded."
+    });
+  } catch (err) {
+    console.error("[meta.reply] Exception replying to chat:", err);
+    return res.status(500).json({ error: "server_error", message: "Failed to send reply." });
+  }
+}
+
+export async function syncMetaConversations(req: Request<{ merchantId?: string }>, res: Response) {
+  const merchantId = req.params.merchantId;
+  if (!merchantId) {
+    return res.status(401).json({ error: "unauthorized", message: "Merchant authentication required." });
+  }
+
+  try {
+    const { data: merchant, error: merchantError } = await supabase
+      .from("merchants")
+      .select("id,business_name,meta_page_id,instagram_business_id,meta_page_access_token")
+      .eq("id", merchantId)
+      .maybeSingle<MerchantRow>();
+
+    if (merchantError || !merchant) {
+      return res.status(404).json({ error: "merchant_not_found", message: "Merchant record not found." });
+    }
+
+    const accessToken = merchant.meta_page_access_token;
+    const targetId = merchant.instagram_business_id || merchant.meta_page_id;
+
+    if (!accessToken || !targetId) {
+      return res.status(200).json({
+        ok: true,
+        messagesCount: 0,
+        message: "Meta channel is not yet connected. Connect your Instagram or WhatsApp account to sync live messages."
+      });
+    }
+
+    console.log(`[meta.sync] Fetching conversations from Meta Graph API for merchant ${merchantId}.`);
+    const isInstagram = Boolean(merchant.instagram_business_id);
+    const platform = isInstagram ? "instagram" : "whatsapp";
+
+    let fetchedMessages: ParsedInboundMessage[] = [];
+
+    try {
+      const graphUrl = isInstagram
+        ? `https://graph.facebook.com/v16.0/${targetId}/conversations?fields=id,messages{id,created_time,from,to,message}&access_token=${encodeURIComponent(accessToken)}`
+        : `https://graph.facebook.com/v16.0/${targetId}/conversations?fields=id,messages{id,created_time,from,to,message}&access_token=${encodeURIComponent(accessToken)}`;
+
+      const response = await fetch(graphUrl);
+      const data = await response.json();
+
+      if (Array.isArray(data?.data)) {
+        for (const convo of data.data) {
+          const messages = convo.messages?.data ?? [];
+          for (const msg of messages) {
+            const senderId = msg.from?.id;
+            const messageText = msg.message?.trim();
+            if (senderId && senderId !== targetId && messageText) {
+              fetchedMessages.push({
+                platform,
+                senderId,
+                recipientPageId: targetId,
+                messageText,
+                userHandle: msg.from?.username || msg.from?.name || senderId
+              });
+            }
+          }
+        }
+      }
+    } catch (graphError) {
+      console.warn("[meta.sync] Meta Graph API query failed:", graphError);
+    }
+
+    let processedCount = 0;
+    for (const msg of fetchedMessages) {
+      const { data: existing } = await supabase
+        .from("chat_logs")
+        .select("id")
+        .eq("merchant_id", merchantId)
+        .eq("external_user_id", msg.senderId)
+        .eq("message_text", msg.messageText)
+        .maybeSingle();
+
+      if (!existing) {
+        await processInboundMessage(msg);
+        processedCount++;
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      messagesCount: processedCount,
+      message: `Successfully synced ${processedCount} new customer messages from ${platform}.`
+    });
+  } catch (error) {
+    console.error("[meta.sync] Error during conversation sync:", error);
+    return res.status(500).json({
+      error: "sync_failed",
+      message: error instanceof Error ? error.message : "Unable to sync Meta conversations."
+    });
+  }
+}
+

@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
 import { authenticateToken } from "../middleware/auth";
+import { dispatchMetaMessage } from "./metaController";
+import { initializePaystackTransaction } from "../services/paystackService";
 
 type CreateCheckoutBody = {
   item_id?: string;
@@ -77,6 +79,19 @@ async function recordOutboundCheckoutMessage(
   if (error) {
     console.error(`[checkout.create] Failed to record outbound checkout link for order ${order.id}.`, error);
   }
+
+  const { data: merchant } = await supabase
+    .from("merchants")
+    .select("meta_page_access_token")
+    .eq("id", order.merchant_id)
+    .maybeSingle<{ meta_page_access_token: string | null }>();
+
+  await dispatchMetaMessage({
+    platform: channel,
+    recipientId: externalUserId,
+    messageText,
+    accessToken: merchant?.meta_page_access_token
+  });
 }
 
 export const checkoutRoutes = {
@@ -139,7 +154,30 @@ export const checkoutRoutes = {
       });
     }
 
-    const checkoutUrl = buildCheckoutUrl(insertedOrder.id, paystackReference);
+    let checkoutUrl = buildCheckoutUrl(insertedOrder.id, paystackReference);
+
+    try {
+      const customerEmail = `${customer_phone.replace(/[^0-9]/g, "") || "customer"}@zukka.shop`;
+      const paystackSession = await initializePaystackTransaction({
+        email: customerEmail,
+        amountNaira: Number(amount_naira),
+        reference: paystackReference,
+        metadata: {
+          order_id: insertedOrder.id,
+          merchant_id: merchantId,
+          customer_phone,
+          delivery_method,
+          delivery_lga
+        }
+      });
+
+      if (paystackSession.authorization_url) {
+        checkoutUrl = paystackSession.authorization_url;
+      }
+    } catch (paystackErr) {
+      console.warn("[checkout.create] Paystack initialization fallback to local URL:", paystackErr);
+    }
+
     const { data: order, error: updateError } = await supabase
       .from("orders")
       .update({ checkout_url: checkoutUrl })
@@ -159,10 +197,11 @@ export const checkoutRoutes = {
 
     await recordOutboundCheckoutMessage(order, social_channel, external_user_id, checkoutUrl);
 
-    console.log(`[checkout.create] Checkout link generated for order ${order.id}.`);
+    console.log(`[checkout.create] Checkout link generated for order ${order.id}: ${checkoutUrl}`);
     return res.status(201).json({
       order,
       checkout_link: checkoutUrl,
+      paystack_reference: paystackReference,
       social_delivery: social_channel && external_user_id ? "recorded_for_dispatch" : "not_requested"
     });
   }

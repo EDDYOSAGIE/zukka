@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
-import { buildSectorNewsSnapshot } from "../services/openaiService";
+import { fetchSectorNewsSnapshot } from "../services/openaiService";
 
 type MerchantDashboardParams = {
   merchantId?: string;
@@ -93,7 +93,7 @@ export async function getMerchantDashboard(req: Request<MerchantDashboardParams>
   const completedOrders = (orders ?? []).filter((order) => ["paid", "dispatched"].includes(order.payment_status));
   const gmv = completedOrders.reduce((sum, order) => sum + Number(order.amount_naira ?? 0), 0);
   const deliveryIntegrity = completedOrders.length > 0 ? "96%" : "94%";
-  const sectorNews = buildSectorNewsSnapshot(merchant.sector ?? "general");
+  const sectorNews = await fetchSectorNewsSnapshot(merchant.sector ?? "general", merchant.business_name);
 
   return res.status(200).json({
     merchant: {

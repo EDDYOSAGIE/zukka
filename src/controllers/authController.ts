@@ -231,3 +231,134 @@ export async function loginMerchant(req: Request<object, object, LoginMerchantBo
     });
   }
 }
+
+function getPublicAppUrl(): string {
+  return (process.env.PUBLIC_APP_URL ?? "http://127.0.0.1:5173").replace(/\/$/, "");
+}
+
+export async function forgotPassword(req: Request<object, object, { email?: string }>, res: Response) {
+  const email = req.body.email ? normalizeEmail(req.body.email) : "";
+
+  if (!email) {
+    return res.status(400).json({
+      error: "missing_email",
+      message: "Please provide the email address associated with your merchant account."
+    });
+  }
+
+  try {
+    const { data: merchant, error } = await supabase
+      .from("merchants")
+      .select("id,business_name,email")
+      .eq("email", email)
+      .maybeSingle<{ id: string; business_name: string; email: string }>();
+
+    if (error) {
+      console.error("[auth.forgotPassword] Database query failed:", error);
+      return res.status(500).json({
+        error: "lookup_failed",
+        message: "Unable to process password reset at this time."
+      });
+    }
+
+    if (!merchant) {
+      console.log(`[auth.forgotPassword] No account found for ${email}. Returning generic response for security.`);
+      return res.status(200).json({
+        ok: true,
+        message: "If an account matches this email, instructions to reset your password have been sent."
+      });
+    }
+
+    // Generate a secure reset token valid for 1 hour
+    const resetToken = jwt.sign(
+      { merchantId: merchant.id, email: merchant.email, purpose: "password_reset" },
+      getJwtSecret(),
+      { expiresIn: "1h" }
+    );
+
+    const resetLink = `${getPublicAppUrl()}/?reset_token=${resetToken}`;
+
+    console.log(`\n======================================================`);
+    console.log(`[EMAIL DISPATCH] Password Retrieval for ${merchant.business_name} (${merchant.email})`);
+    console.log(`To reset your password, visit the link below (valid for 1 hour):`);
+    console.log(`${resetLink}`);
+    console.log(`======================================================\n`);
+
+    return res.status(200).json({
+      ok: true,
+      message: "A password reset link has been dispatched to your email address.",
+      resetToken: process.env.NODE_ENV !== "production" ? resetToken : undefined
+    });
+  } catch (err) {
+    console.error("[auth.forgotPassword] Unexpected error:", err);
+    return res.status(500).json({
+      error: "unexpected_error",
+      message: "Unable to complete password reset request."
+    });
+  }
+}
+
+export async function resetPassword(
+  req: Request<object, object, { token?: string; newPassword?: string }>,
+  res: Response
+) {
+  const token = req.body.token?.trim();
+  const newPassword = req.body.newPassword;
+
+  if (!token || !newPassword) {
+    return res.status(400).json({
+      error: "missing_fields",
+      message: "Both reset token and new password are required."
+    });
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({
+      error: "weak_password",
+      message: "Password must be at least 8 characters long."
+    });
+  }
+
+  try {
+    const decoded = jwt.verify(token, getJwtSecret()) as {
+      merchantId?: string;
+      email?: string;
+      purpose?: string;
+    };
+
+    if (decoded.purpose !== "password_reset" || !decoded.merchantId) {
+      return res.status(400).json({
+        error: "invalid_token",
+        message: "Invalid or expired password reset token."
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    const { error: updateError } = await supabase
+      .from("merchants")
+      .update({ password_hash: passwordHash })
+      .eq("id", decoded.merchantId);
+
+    if (updateError) {
+      console.error("[auth.resetPassword] Failed to update password in database:", updateError);
+      return res.status(500).json({
+        error: "update_failed",
+        message: "Unable to update password at this time."
+      });
+    }
+
+    console.log(`[auth.resetPassword] Password successfully reset for merchant ${decoded.merchantId}.`);
+    return res.status(200).json({
+      ok: true,
+      message: "Your password has been successfully updated. You can now log in with your new credentials."
+    });
+  } catch (err) {
+    console.error("[auth.resetPassword] Token verification failed:", err);
+    return res.status(400).json({
+      error: "token_expired_or_invalid",
+      message: "Password reset link is invalid or has expired. Please request a new one."
+    });
+  }
+}
+

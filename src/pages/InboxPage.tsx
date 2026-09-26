@@ -5,40 +5,37 @@ import { Card, PageHeader } from "../components/Layout";
 import { formatNaira, useZukka } from "../state/ZukkaContext";
 
 export function InboxPage({ onNavigate }: { onNavigate: (page: PageKey) => void }) {
-  const { chats, inventory, approveBargain, updateBargainRequest } = useZukka();
+  const { chats, inventory, approveBargain, declineBargain, sendReply } = useZukka();
   const [alertId, setAlertId] = useState(chats[0]?.id);
   const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
   const [editPrice, setEditPrice] = useState(0);
   const [editMessage, setEditMessage] = useState("");
-  const alert = chats.find((chat) => chat.id === alertId);
-  const alertItem = inventory.find((item) => item.id === alert?.itemId);
+  const alert = chats.find((chat) => chat.id === alertId) ?? chats[0];
+  const alertItem = inventory.find((item) => item.id === alert?.itemId)
+    ?? inventory.find((item) => alert?.text?.toLowerCase().includes(item.title.toLowerCase()))
+    ?? inventory[0];
 
   const approve = () => {
     if (!alert) return;
     void approveBargain(alert.id).then(() => onNavigate("checkout"));
   };
 
+  const decline = () => {
+    if (!alert) return;
+    void declineBargain(alert.id);
+  };
+
   const openEditPanel = () => {
     if (!alert) return;
-    setEditPrice(alert.suggestedPrice ?? 0);
+    setEditPrice(alert.suggestedPrice ?? alertItem?.basePrice ?? 0);
     setEditMessage("");
     setIsEditPanelOpen(true);
   };
 
   const saveCounteroffer = () => {
     if (!alert) return;
-
-    const note = editMessage.trim();
-    const merchantReply = note
-      ? `${alert.text}\nMerchant note: ${note}`
-      : `${alert.text}\nMerchant note: Counteroffer updated to ${formatNaira(editPrice)}`;
-
-    updateBargainRequest(alert.id, {
-      suggestedPrice: editPrice,
-      approved: false,
-      status: "countered",
-      text: merchantReply
-    });
+    const note = editMessage.trim() || `Counteroffer updated to ${formatNaira(editPrice)}`;
+    void sendReply(alert.id, note, editPrice);
     setIsEditPanelOpen(false);
     setEditMessage("");
   };
@@ -100,19 +97,26 @@ export function InboxPage({ onNavigate }: { onNavigate: (page: PageKey) => void 
                 </div>
               </div>
 
-              <div className="flex flex-none gap-2 pl-12 sm:pl-0">
+              <div className="flex flex-none flex-wrap gap-2 pl-12 sm:pl-0">
                 <button
                   onClick={approve}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-navy px-4 py-2.5 text-xs font-bold uppercase tracking-wide text-white transition-colors hover:bg-navy/90 active:scale-[0.98]"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-navy px-3.5 py-2.5 text-xs font-bold uppercase tracking-wide text-white transition-colors hover:bg-navy/90 active:scale-[0.98]"
                 >
-                  <Check size={15} strokeWidth={2.5} /> Approve
+                  <Check size={14} strokeWidth={2.5} /> Approve
                 </button>
                 <button
                   type="button"
                   onClick={openEditPanel}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold uppercase tracking-wide text-slate-500 transition-colors hover:border-slate-300 hover:text-navy active:scale-[0.98]"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-bold uppercase tracking-wide text-navy transition-colors hover:border-slate-400 hover:bg-slate-50 active:scale-[0.98]"
                 >
-                  <X size={15} strokeWidth={2.5} /> Decline
+                  Counter
+                </button>
+                <button
+                  type="button"
+                  onClick={decline}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3.5 py-2.5 text-xs font-bold uppercase tracking-wide text-rose-600 transition-colors hover:border-rose-300 hover:bg-rose-50 active:scale-[0.98]"
+                >
+                  <X size={14} strokeWidth={2.5} /> Decline
                 </button>
               </div>
             </div>
@@ -151,6 +155,9 @@ export function InboxPage({ onNavigate }: { onNavigate: (page: PageKey) => void 
                             ) : null}
                             {chat.status === "countered" ? (
                               <span className="text-xs font-black text-amber-600">Edited</span>
+                            ) : null}
+                            {chat.status === "declined" ? (
+                              <span className="text-xs font-black text-rose-500">Declined</span>
                             ) : null}
                           </div>
                           {chat.media ? (

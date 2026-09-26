@@ -1,6 +1,6 @@
-import { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import io from "socket.io-client";
-import { createCheckoutOrder, getMetaConnectUrl, getMerchantDashboard } from "../lib/api";
+import { createCheckoutOrder, getMetaConnectUrl, getMerchantDashboard, getMerchantChats, replyToChatMessage } from "../lib/api";
 
 export type ChannelStatus = "connected" | "link" | "processing";
 export type MessageChannel = "instagram" | "whatsapp";
@@ -31,6 +31,7 @@ export type ChatMessage = {
   suggestedPrice?: number;
   approved?: boolean;
   status?: BargainStatus;
+  direction?: "inbound" | "outbound";
 };
 
 export type Order = {
@@ -64,10 +65,13 @@ type ZukkaContextValue = {
   addInventoryItem: (item: Omit<InventoryItem, "id">) => void;
   simulateBargainRequest: (media?: string) => ChatMessage;
   approveBargain: (messageId: string) => Promise<Order>;
+  declineBargain: (messageId: string) => Promise<void>;
+  sendReply: (chatId: string, messageText: string, counterPrice?: number) => Promise<void>;
   updateBargainRequest: (messageId: string, updates: Partial<ChatMessage>) => void;
   scheduleDrop: (drop: Omit<ScheduledDrop, "id">) => void;
   markOrderPaid: (ref: string) => void;
   setDeliveryMethod: (ref: string, method: DeliveryMethod) => void;
+  refreshChats: () => Promise<void>;
 };
 
 const ZukkaContext = createContext<ZukkaContextValue | null>(null);
@@ -157,9 +161,34 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
   const [drops, setDrops] = useState<ScheduledDrop[]>([]);
   const [selectedCheckoutRef, setSelectedCheckoutRef] = useState("ZUK-1003");
 
+  const refreshChats = useCallback(async () => {
+    try {
+      const resp = await getMerchantChats();
+      if (Array.isArray(resp?.chats) && resp.chats.length > 0) {
+        const formatted: ChatMessage[] = resp.chats.map((row) => ({
+          id: row.id,
+          customer: row.user_handle || row.external_user_id || "Customer",
+          handle: row.user_handle || row.external_user_id || "customer",
+          channel: row.platform,
+          text: row.message_text,
+          createdAt: new Date(row.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          direction: row.direction,
+          status: row.sentiment_flag === "counteroffer_sent"
+            ? "countered"
+            : row.sentiment_flag === "checkout_link_sent"
+              ? "approved"
+              : undefined
+        }));
+        setChats(formatted);
+      }
+    } catch (err) {
+      console.warn("[context] Could not fetch real chat history:", err);
+    }
+  }, []);
+
   const connectMeta = async () => {
     setChannels((current) => ({ ...current, meta: "processing" }));
-    const popup = window.open("about:blank", "_blank", "noopener,noreferrer");
+    const popup = window.open("about:blank", "zukka_meta_connect", "width=600,height=720");
 
     try {
       if (!popup) {
@@ -168,7 +197,6 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
 
       const { connectUrl } = await getMetaConnectUrl();
       popup.location.href = connectUrl;
-      setChannels((current) => ({ ...current, meta: "connected" }));
     } catch (error) {
       setChannels((current) => ({ ...current, meta: "link" }));
       if (popup && !popup.closed) {
@@ -181,6 +209,19 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
   const socketRef = useRef<ReturnType<typeof io> | null>(null);
 
   useEffect(() => {
+    const handleMessage = async (event: MessageEvent) => {
+      if (event.data?.type === "META_AUTH_SUCCESS") {
+        setChannels((current) => ({ ...current, meta: "connected" }));
+        void refreshChats();
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+    };
+  }, [refreshChats]);
+
+  useEffect(() => {
     let mounted = true;
 
     (async () => {
@@ -189,6 +230,12 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
         const merchantId = dashboard.merchant?.id;
 
         if (!merchantId) return;
+
+        if (dashboard.merchant?.meta_connected) {
+          setChannels((current) => ({ ...current, meta: "connected" }));
+        }
+
+        void refreshChats();
 
         const socketUrl = (import.meta.env.VITE_ZUKA_API_URL ?? "http://127.0.0.1:8080").replace(/\/$/, "");
         const socket = io(socketUrl, { transports: ["websocket"] });
@@ -202,21 +249,58 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
           });
         });
 
-        socket.on("bargain_alert", (payload: any) => {
+        socket.on("inbound_chat", (payload: any) => {
           if (!mounted) return;
 
-          const message: ChatMessage = {
-            id: `chat-${Math.random().toString(36).slice(2, 9)}`,
+          const newMessage: ChatMessage = {
+            id: payload.chatLogId || `chat-${Math.random().toString(36).slice(2, 9)}`,
             customer: payload.buyerHandle || "Social Customer",
             handle: payload.buyerHandle || payload.externalUserId || "social-user",
             channel: payload.channel === "whatsapp" ? "whatsapp" : "instagram",
-            text: `Bargain alert: ${payload.itemName} — customer suggested ${payload.customerOfferPrice ?? "n/a"}`,
-            createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            itemId: undefined,
-            suggestedPrice: payload.recommendedCounterOfferPrice ?? undefined
+            text: payload.messageText || `New message on ${payload.channel}`,
+            createdAt: payload.createdAt || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            itemId: payload.itemId,
+            suggestedPrice: payload.recommendedCounterOfferPrice ?? undefined,
+            status: payload.detectsBargain ? "pending" : undefined,
+            direction: "inbound"
           };
 
-          setChats((current) => [message, ...current]);
+          setChats((current) => [newMessage, ...current.filter((c) => c.id !== newMessage.id)]);
+        });
+
+        socket.on("bargain_alert", (payload: any) => {
+          if (!mounted) return;
+
+          setChats((current) => {
+            const existing = current.find((c) => c.id === payload.chatLogId);
+            if (existing) {
+              return current.map((c) =>
+                c.id === payload.chatLogId
+                  ? {
+                      ...c,
+                      itemId: payload.itemId ?? c.itemId,
+                      suggestedPrice: payload.recommendedCounterOfferPrice ?? c.suggestedPrice,
+                      status: "pending"
+                    }
+                  : c
+              );
+            }
+
+            const message: ChatMessage = {
+              id: payload.chatLogId || `chat-${Math.random().toString(36).slice(2, 9)}`,
+              customer: payload.buyerHandle || "Social Customer",
+              handle: payload.buyerHandle || payload.externalUserId || "social-user",
+              channel: payload.channel === "whatsapp" ? "whatsapp" : "instagram",
+              text: payload.messageText || `Bargain alert: ${payload.itemName}`,
+              createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              itemId: payload.itemId,
+              suggestedPrice: payload.recommendedCounterOfferPrice ?? undefined,
+              status: "pending",
+              direction: "inbound"
+            };
+
+            return [message, ...current];
+          });
         });
       } catch (err) {
         // Not logged in or dashboard unavailable — ignore
@@ -230,7 +314,7 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
         socketRef.current = null;
       }
     };
-  }, []);
+  }, [refreshChats]);
 
   const addInventoryItem = (item: Omit<InventoryItem, "id">) => {
     setInventory((current) => [{ ...item, id: createId("item") }, ...current]);
@@ -248,9 +332,9 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
       createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       itemId: item.id,
       media,
-      suggestedPrice
+      suggestedPrice,
+      direction: "inbound"
     };
-    /* FOUNDER_INNOVATION_SPACE_MODULE_1_CHANNELS_AND_NEGOTIATION */
     setChats((current) => [message, ...current]);
     return message;
   };
@@ -259,9 +343,46 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
     setChats((current) => current.map((entry) => (entry.id === messageId ? { ...entry, ...updates } : entry)));
   };
 
+  const declineBargain = async (messageId: string) => {
+    const message = chats.find((entry) => entry.id === messageId);
+    if (!message) return;
+
+    try {
+      await replyToChatMessage(messageId, "Thank you for your interest! Unfortunately we cannot offer a further discount on this item at this time.");
+    } catch (err) {
+      console.warn("[context.decline] Backend reply error:", err);
+    }
+
+    updateBargainRequest(messageId, {
+      approved: false,
+      status: "declined",
+      text: `${message.text}\nMerchant reply: Offer declined.`
+    });
+  };
+
+  const sendReply = async (chatId: string, messageText: string, counterPrice?: number) => {
+    const message = chats.find((entry) => entry.id === chatId);
+    if (!message) return;
+
+    try {
+      await replyToChatMessage(chatId, messageText, counterPrice);
+    } catch (err) {
+      console.warn("[context.reply] Backend reply failed, saving locally.", err);
+    }
+
+    updateBargainRequest(chatId, {
+      suggestedPrice: counterPrice ?? message.suggestedPrice,
+      approved: false,
+      status: counterPrice ? "countered" : message.status,
+      text: `${message.text}\nMerchant reply: ${messageText}`
+    });
+  };
+
   const approveBargain = async (messageId: string) => {
     const message = chats.find((entry) => entry.id === messageId);
-    const item = inventory.find((entry) => entry.id === message?.itemId) ?? inventory[0];
+    const item = inventory.find((entry) => entry.id === message?.itemId)
+      ?? inventory.find((entry) => message?.text.toLowerCase().includes(entry.title.toLowerCase()))
+      ?? inventory[0];
     const price = message?.suggestedPrice ?? Math.max(Math.round(item.basePrice * 0.9), item.minFloor);
     let order: Order;
 
@@ -340,12 +461,15 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
       addInventoryItem,
       simulateBargainRequest,
       approveBargain,
+      declineBargain,
+      sendReply,
       updateBargainRequest,
       scheduleDrop,
       markOrderPaid,
-      setDeliveryMethod
+      setDeliveryMethod,
+      refreshChats
     }),
-    [channels, inventory, chats, orders, drops, selectedCheckoutRef]
+    [channels, inventory, chats, orders, drops, selectedCheckoutRef, refreshChats]
   );
 
   return <ZukkaContext.Provider value={value}>{children}</ZukkaContext.Provider>;
