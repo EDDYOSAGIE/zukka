@@ -2,13 +2,21 @@ import fs from 'fs'
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+
+
+const isLocalDev = process.env.NODE_ENV !== 'production'
+
 export default defineConfig({
   plugins: [react()],
   server: {
-    https: {
-      key: fs.readFileSync('./127.0.0.1+1-key.pem'),
-      cert: fs.readFileSync('./127.0.0.1+1.pem'),
-    },
+    ...(isLocalDev && fs.existsSync('./zukka.local-key.pem')
+      ? {
+          https: {
+            key: fs.readFileSync('./zukka.local-key.pem'),
+            cert: fs.readFileSync('./zukka.local.pem'),
+          },
+        }
+      : {}),
     port: 5173,
     proxy: {
       "/api": {
