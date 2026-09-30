@@ -242,9 +242,9 @@ function isGoogleAiStudioKey(value: string | null): boolean {
 function getGeminiModelCandidates(): string[] {
   const configured = (process.env.GEMINI_MODEL ?? "").trim();
   const preferred = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-5.5-flash"
+    "gemini-2.5-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash-lite"
   ];
 
   if (!configured) {
