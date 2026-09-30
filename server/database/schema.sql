@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS merchants (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE public.merchants
+  ADD COLUMN IF NOT EXISTS business_address TEXT,
+  ADD COLUMN IF NOT EXISTS business_latitude NUMERIC(10, 7),
+  ADD COLUMN IF NOT EXISTS business_longitude NUMERIC(10, 7);
+
 CREATE TABLE IF NOT EXISTS inventory (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   merchant_id UUID NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
@@ -49,6 +54,51 @@ CREATE TABLE IF NOT EXISTS orders (
   delivery_lga VARCHAR(120) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.orders
+  ADD COLUMN IF NOT EXISTS customer_name VARCHAR(180),
+  ADD COLUMN IF NOT EXISTS customer_email VARCHAR(254),
+  ADD COLUMN IF NOT EXISTS delivery_address TEXT,
+  ADD COLUMN IF NOT EXISTS delivery_latitude NUMERIC(10, 7),
+  ADD COLUMN IF NOT EXISTS delivery_longitude NUMERIC(10, 7),
+  ADD COLUMN IF NOT EXISTS delivery_fee_naira NUMERIC(12, 2),
+  ADD COLUMN IF NOT EXISTS delivery_fee_id VARCHAR(128),
+  ADD COLUMN IF NOT EXISTS delivery_fee_quoted_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS order_status VARCHAR(40) NOT NULL DEFAULT 'pending',
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE TABLE IF NOT EXISTS public.deliveries (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  order_id UUID NOT NULL UNIQUE REFERENCES public.orders(id) ON DELETE CASCADE,
+  provider VARCHAR(40) NOT NULL DEFAULT 'chowdeck',
+  provider_delivery_id VARCHAR(180),
+  provider_reference VARCHAR(180),
+  fee_id VARCHAR(128),
+  delivery_fee_naira NUMERIC(12, 2),
+  estimated_order_amount_naira NUMERIC(12, 2),
+  status VARCHAR(40) NOT NULL DEFAULT 'pending',
+  tracking_url TEXT,
+  delivery_pin VARCHAR(40),
+  source_name VARCHAR(180),
+  source_phone VARCHAR(32),
+  source_address TEXT,
+  source_latitude NUMERIC(10, 7),
+  source_longitude NUMERIC(10, 7),
+  destination_name VARCHAR(180),
+  destination_phone VARCHAR(32),
+  destination_address TEXT,
+  destination_latitude NUMERIC(10, 7),
+  destination_longitude NUMERIC(10, 7),
+  customer_delivery_note TEXT,
+  delivered_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deliveries_created_at
+  ON public.deliveries (created_at DESC);
+
+NOTIFY pgrst, 'reload schema';
 
 CREATE TABLE IF NOT EXISTS scheduled_drops (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

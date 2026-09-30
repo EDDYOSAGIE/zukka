@@ -237,7 +237,7 @@ export function ZukkaProvider({ children }: { children: ReactNode }) {
 
         void refreshChats();
 
-        const socketUrl = (import.meta.env.VITE_ZUKA_API_URL ?? "http://127.0.0.1:8080").replace(/\/$/, "");
+        const socketUrl = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8080").replace(/\/$/, "");
         const socket = io(socketUrl, { transports: ["websocket"] });
         socketRef.current = socket;
 

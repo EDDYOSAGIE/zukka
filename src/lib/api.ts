@@ -1,5 +1,5 @@
 import type { DeliveryMethod } from "../state/ZukkaContext";
-
+export const API_URL = import.meta.env.VITE_API_URL ?? '';
 const apiBaseUrl = (import.meta.env.VITE_ZUKA_API_URL ?? "/api").replace(/\/$/, "");
 
 type CreateCheckoutOrderRequest = {

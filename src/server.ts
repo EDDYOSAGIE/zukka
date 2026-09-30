@@ -49,7 +49,7 @@ app.disable("x-powered-by");
 
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://127.0.0.1:5173";
 app.use(
-  "/api/delivery",
+  "/delivery",
   deliveryRoutes
 );
 app.use(
