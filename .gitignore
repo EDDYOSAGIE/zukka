@@ -7,3 +7,5 @@ dist/
 .env.*
 !.env.example
 *.pem
+vite.config.ts.timestamp-*
+*.pem
